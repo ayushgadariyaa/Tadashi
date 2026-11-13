@@ -71,7 +71,7 @@ a{color:var(--accent)}
 const $=s=>document.querySelector(s);
 const S={get(k,d){try{const v=localStorage.getItem('pa.'+k);return v===null?d:JSON.parse(v)}catch{return d}},set(k,v){try{localStorage.setItem('pa.'+k,JSON.stringify(v))}catch{}}};
 // ---- SETUP: fill in ONE of these two lines (see the instructions) ----
-const PROXY_URL='https://script.google.com/macros/s/AKfycby5NwuBzE0WAqWlUcP3DrKbddKPLHsIp89IwGBxMC9-ASaFHY3Ovb5nC1c42h3lEH2r/exec';  // Safer: your Google Apps Script link
+const PROXY_URL='';  // Safer: your Google Apps Script link
 const API_KEY='';    // Quick test only: anyone can see this on GitHub
 const SETUP_MSG='Setup isn’t finished: open index.html and add your Apps Script link (PROXY_URL) or your Gemini key (API_KEY) near the top of the script.';
 const BASE='https://generativelanguage.googleapis.com/v1beta';
@@ -81,23 +81,24 @@ function rankModels(ms){
   const flash=ok.filter(n=>/^gemini-[\d.]+-flash(-\d+)?$/.test(n)).sort((a,b)=>v(b)-v(a));
   return [...new Set([...flash,'gemini-flash-latest','gemini-2.5-flash'])].slice(0,4);
 }
-async function gemini(body){
+async function gemini(body,signal){
   if(PROXY_URL){
-    const r=await fetch(PROXY_URL,{method:'POST',body:JSON.stringify(body)});
+    const r=await fetch(PROXY_URL,{method:'POST',body:JSON.stringify(body),signal});
     const d=await r.json().catch(()=>({}));
     if(d.error)throw new Error(friendly(d.error.code||r.status,d));
+    if(!d.candidates&&!d.promptFeedback)throw new Error('Your Apps Script link didn’t return an answer. Check the deployment (access: Anyone) and that GEMINI_KEY is saved in Script properties.');
     return d;
   }
   const H={'Content-Type':'application/json','x-goog-api-key':API_KEY};
   let list=S.get('models',null),last={status:0,d:{}};
   if(!list){
-    const r=await fetch(BASE+'/models?pageSize=1000',{headers:H});
+    const r=await fetch(BASE+'/models?pageSize=1000',{headers:H,signal});
     const d=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(friendly(r.status,d));
     list=rankModels(d.models||[]);S.set('models',list);
   }
   for(const m of list){
-    const r=await fetch(`${BASE}/models/${m}:generateContent`,{method:'POST',headers:H,body:JSON.stringify(body)});
+    const r=await fetch(`${BASE}/models/${m}:generateContent`,{method:'POST',headers:H,body:JSON.stringify(body),signal});
     const d=await r.json().catch(()=>({}));
     if(r.ok)return d;
     last={status:r.status,d};
@@ -151,20 +152,21 @@ async function send(text){
   text=text.trim();if(!text||busy)return;
   if(!PROXY_URL&&!API_KEY){showErr(SETUP_MSG);return}
   showErr('');busy=true;$('#send').disabled=true;
+  const ctl=new AbortController(),t1=setTimeout(()=>ctl.abort(),50000),t2=setTimeout(()=>{const x=document.querySelector('.dots');if(x)x.textContent='Still working… the first reply can take up to a minute.'},10000);
   chat.push({role:'user',text});render(true);$('#msg').value='';grow();
   try{
     const when=new Date().toLocaleString([], {dateStyle:'full',timeStyle:'short'});
     const body={system_instruction:{parts:[{text:S.get('instr',DEFAULT_INSTR)+'\n\nCurrent date and time: '+when}]},
       contents:chat.slice(-30).map(m=>({role:m.role,parts:[{text:m.text}]}))};
-    const d=await gemini(body);
+    const d=await gemini(body,ctl.signal);
     const t=((d.candidates||[])[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
     if(!t)throw new Error('The assistant sent back an empty reply. Try rephrasing your message.');
     chat.push({role:'model',text:t});S.set('chat',chat);
   }catch(e){
     chat.pop();$('#msg').value=text;grow();
-    showErr(e instanceof TypeError?'Can’t reach the internet. Check your connection and try again.':e.message);
+    showErr(e.name==='AbortError'?'No reply after 50 seconds. Try again. If it keeps happening, check your setup (Apps Script link or Gemini key).':e instanceof TypeError?(PROXY_URL?'Couldn’t reach your Apps Script link. Check that it ends in /exec and that access is set to Anyone.':'Can’t reach Google. Check your connection and try again.'):e.message);
   }
-  busy=false;$('#send').disabled=false;render();
+  clearTimeout(t1);clearTimeout(t2);busy=false;$('#send').disabled=false;render();
 }
 function grow(){const t=$('#msg');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,160)+'px'}
 function openSettings(){$('#instr').value=S.get('instr',DEFAULT_INSTR);$('#dlg').showModal()}
