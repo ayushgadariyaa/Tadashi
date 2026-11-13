@@ -62,12 +62,6 @@ a{color:var(--accent)}
 
 <dialog id="dlg">
   <h2>Settings</h2>
-  <label for="key">Gemini API key</label>
-  <input id="key" type="password" autocomplete="off" placeholder="Paste your key here">
-  <small>Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a>. It is saved only on this device. On the free tier, Google may use what you send to improve its products.</small>
-  <label for="model">Model</label>
-  <input id="model" autocomplete="off">
-  <small>If you see a “model not found” message, change this to another current Gemini Flash model name from AI Studio.</small>
   <label for="instr">How the assistant should behave</label>
   <textarea id="instr" rows="9"></textarea>
   <div class="row"><button class="link" id="reset" type="button">Reset text</button><button class="link" id="cancel" type="button">Cancel</button><button class="primary" id="save" type="button">Save</button></div>
@@ -76,7 +70,42 @@ a{color:var(--accent)}
 <script>
 const $=s=>document.querySelector(s);
 const S={get(k,d){try{const v=localStorage.getItem('pa.'+k);return v===null?d:JSON.parse(v)}catch{return d}},set(k,v){try{localStorage.setItem('pa.'+k,JSON.stringify(v))}catch{}}};
-const DEFAULT_MODEL='gemini-2.5-flash';
+// ---- SETUP: fill in ONE of these two lines (see the instructions) ----
+const PROXY_URL='https://script.google.com/macros/s/AKfycby5NwuBzE0WAqWlUcP3DrKbddKPLHsIp89IwGBxMC9-ASaFHY3Ovb5nC1c42h3lEH2r/exec';  // Safer: your Google Apps Script link
+const API_KEY='';    // Quick test only: anyone can see this on GitHub
+const SETUP_MSG='Setup isn’t finished: open index.html and add your Apps Script link (PROXY_URL) or your Gemini key (API_KEY) near the top of the script.';
+const BASE='https://generativelanguage.googleapis.com/v1beta';
+function rankModels(ms){
+  const ok=ms.filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')).map(m=>m.name.replace('models/',''));
+  const v=n=>parseFloat(n.match(/gemini-([\d.]+)/)[1]);
+  const flash=ok.filter(n=>/^gemini-[\d.]+-flash(-\d+)?$/.test(n)).sort((a,b)=>v(b)-v(a));
+  return [...new Set([...flash,'gemini-flash-latest','gemini-2.5-flash'])].slice(0,4);
+}
+async function gemini(body){
+  if(PROXY_URL){
+    const r=await fetch(PROXY_URL,{method:'POST',body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(d.error)throw new Error(friendly(d.error.code||r.status,d));
+    return d;
+  }
+  const H={'Content-Type':'application/json','x-goog-api-key':API_KEY};
+  let list=S.get('models',null),last={status:0,d:{}};
+  if(!list){
+    const r=await fetch(BASE+'/models?pageSize=1000',{headers:H});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(friendly(r.status,d));
+    list=rankModels(d.models||[]);S.set('models',list);
+  }
+  for(const m of list){
+    const r=await fetch(`${BASE}/models/${m}:generateContent`,{method:'POST',headers:H,body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok)return d;
+    last={status:r.status,d};
+    if(r.status!==404&&r.status!==429)break;
+  }
+  S.set('models',null);
+  throw new Error(friendly(last.status,last.d));
+}
 const DEFAULT_INSTR=`You are my personal assistant. Be warm, brief and practical. Use plain language and avoid jargon. If you need more information, ask one question at a time.
 
 Safety rules:
@@ -113,24 +142,21 @@ function render(pending){
 function showErr(t){const e=$('#err');e.textContent=t||'';e.style.display=t?'block':'none'}
 function friendly(status,d){
   const m=d&&d.error&&d.error.message||'';
-  if(status===400&&/api key/i.test(m)||status===403)return 'Your API key wasn’t accepted. Open Settings and paste it again.';
-  if(status===404)return 'That model name wasn’t found. Open Settings and try gemini-2.5-flash.';
+  if(status===400&&/api key/i.test(m)||status===403)return 'Your Gemini key wasn’t accepted. Check the key you added during setup.';
+  if(status===404)return 'No Gemini model was available for your key right now. Try again in a minute.';
   if(status===429)return 'The free limit was reached for now. Wait a minute and try again.';
   return m||`Something went wrong (code ${status}). Try again.`;
 }
 async function send(text){
   text=text.trim();if(!text||busy)return;
-  const key=S.get('key','');if(!key){openSettings();return}
+  if(!PROXY_URL&&!API_KEY){showErr(SETUP_MSG);return}
   showErr('');busy=true;$('#send').disabled=true;
   chat.push({role:'user',text});render(true);$('#msg').value='';grow();
   try{
     const when=new Date().toLocaleString([], {dateStyle:'full',timeStyle:'short'});
     const body={system_instruction:{parts:[{text:S.get('instr',DEFAULT_INSTR)+'\n\nCurrent date and time: '+when}]},
       contents:chat.slice(-30).map(m=>({role:m.role,parts:[{text:m.text}]}))};
-    const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(S.get('model',DEFAULT_MODEL))}:generateContent`,
-      {method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify(body)});
-    const d=await r.json().catch(()=>({}));
-    if(!r.ok)throw new Error(friendly(r.status,d));
+    const d=await gemini(body);
     const t=((d.candidates||[])[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
     if(!t)throw new Error('The assistant sent back an empty reply. Try rephrasing your message.');
     chat.push({role:'model',text:t});S.set('chat',chat);
@@ -141,7 +167,7 @@ async function send(text){
   busy=false;$('#send').disabled=false;render();
 }
 function grow(){const t=$('#msg');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,160)+'px'}
-function openSettings(){$('#key').value=S.get('key','');$('#model').value=S.get('model',DEFAULT_MODEL);$('#instr').value=S.get('instr',DEFAULT_INSTR);$('#dlg').showModal()}
+function openSettings(){$('#instr').value=S.get('instr',DEFAULT_INSTR);$('#dlg').showModal()}
 
 $('#f').onsubmit=e=>{e.preventDefault();send($('#msg').value)};
 $('#msg').oninput=grow;
@@ -150,10 +176,10 @@ $('#new').onclick=()=>{if(busy)return;chat=[];S.set('chat',chat);showErr('');ren
 $('#open').onclick=openSettings;
 $('#cancel').onclick=()=>$('#dlg').close();
 $('#reset').onclick=()=>{$('#instr').value=DEFAULT_INSTR};
-$('#save').onclick=()=>{S.set('key',$('#key').value.trim());S.set('model',$('#model').value.trim()||DEFAULT_MODEL);S.set('instr',$('#instr').value.trim()||DEFAULT_INSTR);showErr('');$('#dlg').close()};
+$('#save').onclick=()=>{S.set('instr',$('#instr').value.trim()||DEFAULT_INSTR);showErr('');$('#dlg').close()};
 
 render();
-if(!S.get('key',''))openSettings();
+if(!PROXY_URL&&!API_KEY)showErr(SETUP_MSG);
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
